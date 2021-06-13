@@ -10,6 +10,275 @@ from pandas.io.json import json_normalize
 import pandas as pd
 import time
 import multiprocessing
+import concurrent.futures
+import re
+from tqdm import tqdm
+
+
+class EarthExplorer(object):
+
+    def __init__(self, username, password, apiKey=None, maxthreads=5):
+        self.maxthreads = maxthreads
+        self.USER = username
+        self.PASSWORD = password
+        self.endpoint = 'https://m2m.cr.usgs.gov/api/api/json/stable/'
+        self.api_key = apiKey
+
+    def sendRequest(self, url, data, apiKey=None, exitIfNoResponse=True):
+        json_data = json.dumps(data)
+        apiKey = self.api_key
+        if apiKey is None:
+            response = requests.post(url, json_data)
+        else:
+            headers = {'X-Auth-Token': apiKey}
+            response = requests.post(url, json_data, headers=headers)
+        try:
+            httpStatusCode = response.status_code
+            if response is None:
+                print("No output from service")
+                if exitIfNoResponse:
+                    sys.exit()
+                else:
+                    return False
+            output = json.loads(response.text)
+
+            if output['errorCode'] is not None:
+                print(output['errorCode'], "- ", output['errorMessage'])
+                if exitIfNoResponse:
+                    sys.exit()
+                else:
+                    return False
+
+            if httpStatusCode == 404:
+                print("404 Not Found")
+                if exitIfNoResponse:
+                    sys.exit()
+                else:
+                    return False
+
+            elif httpStatusCode == 401:
+                print("401 Unauthorized")
+                if exitIfNoResponse:
+                    sys.exit()
+                else:
+                    return False
+
+            elif httpStatusCode == 400:
+                print("Error Code", httpStatusCode)
+                if exitIfNoResponse:
+                    sys.exit()
+                else:
+                    return False
+
+        except Exception as e:
+            response.close()
+            print(e)
+            if exitIfNoResponse:
+                sys.exit()
+            else:
+                return False
+        response.close()
+        return output['data']
+
+    def login(self):
+        url = self.endpoint + "login"
+        payload = {'username': self.USER, 'password': self.PASSWORD}
+        self.api_key = self.sendRequest(url=url, data=payload)
+
+    def logout(self):
+        logout_endpoint = self.endpoint + 'logout'
+        if sendRequest(logout_endpoint, None, self.api_key) is None:
+            print("Logged Out\n")
+        else:
+            print("Logout Failed\n")
+
+    def search(self, collection, bbox, begin=None, end=None,
+               max_cloud_cover=100, starting_number=1,tier=None, max_results=50000):
+
+        begin = datetime.strptime(begin, "%Y-%m-%d")
+        end = datetime.strptime(end, "%Y-%m-%d")
+        self.collection = collection
+        search_endpoint = self.endpoint + 'scene-search'
+        print(search_endpoint)
+        params = {"datasetName": collection,
+                  "sceneFilter": {
+                    "acquisitionFilter": {
+                        "end": end.isoformat(),
+                        "start": begin.isoformat()
+                    },
+                    "spatialFilter": {
+                         "filterType": "mbr",
+                         "lowerLeft": {
+                                "latitude": bbox[1],
+                                "longitude": bbox[0]},
+                         "upperRight": {
+                                "latitude": bbox[3],
+                                "longitude": bbox[2]},
+                    },
+                    "cloudCoverFilter": {
+                        "max": max_cloud_cover,
+                        "min": 0,
+                        },
+                    },
+                  "maxResults": max_results,
+                  "startingNumber": starting_number
+                  }
+        print(params)
+        r = self.sendRequest(url=search_endpoint, data=params,
+                             apiKey=self.api_key, exitIfNoResponse=True)
+
+        self.results = pd.json_normalize(r['results'])
+        if tier is not None and collection != 'sentinel_2a':
+            self.results['tier'] = self.results['displayId'].str.split("_", expand=True)[6]
+            self.results = self.results.loc[self.results['tier'] == tier]
+
+        nrows = len(self.results.index)
+        print(str(nrows) + " scenes found")
+
+    def get_results(self):
+        return self.results
+
+    def thread_download(self, url_list):
+        try:
+            with concurrent.futures.ThreadPoolExecutor(self.threads) as executor:
+                fs = [executor.submit(self.downloadFile, url) for url in url_list]
+                print(fs.result())
+        except KeyboardInterrupt:
+            try:
+                sys.exit(0)
+            except SystemExit:
+                os._exit(0)
+        except Exception as e:
+            pass
+            print("Unknown error occured", e)
+            raise
+            sys.exit()
+
+    def downloadFile(self, url):
+        try:
+            response = requests.get(url, stream=True)
+            file_size = int(response.headers['Content-Length'])
+            disposition = response.headers['content-disposition']
+            filename = re.findall("filename=(.+)", disposition)[0].strip("\"")
+            if self.path != "" and self.path[-1] != "/":
+                filename = "/" + filename
+            if os.path.exists(self.path+filename):
+                first_byte = os.path.getsize(self.path+filename)
+            else:
+                first_byte = 0
+            if first_byte >= file_size:
+                return file_size
+            print(f"Downloading {filename} ...\n")
+            pbar = tqdm(
+                total=file_size, initial=first_byte,
+                unit='B', unit_scale=True, desc=filename)
+            with(open(self.path+filename, 'wb')) as f:
+                for chunk in response.iter_content(chunk_size=1024):
+                    if chunk:
+                        f.write(chunk)
+                        pbar.update(1024)
+            pbar.close()
+        except Exception as e:
+            print(f"Failed to download from {url}. Will try to re-download.")
+            print(e)
+
+    def download(self, path, maxthreads=2):
+
+        self.path = path
+        startTime = time.time()
+        entityIds = self.results['entityId'].tolist()
+        datasetName = self.collection
+        idField = 'entityId'
+        listId = f"temp_{datasetName}_list"
+        payload = {"listId": listId, 'idField': idField,
+                   "entityIds": entityIds, "datasetName": datasetName}
+
+        count = self.sendRequest(self.endpoint + "scene-list-add", payload,
+                                 self.api_key)
+        print("Added", count, "scenes\n")
+
+        payload = {"listId": listId, "datasetName": datasetName}
+
+        products = self.sendRequest(self.endpoint + "download-options",
+                                    payload, self.api_key)
+
+        print("Got product download options\n")
+
+        downloads = []
+        for product in products:
+            if product["bulkAvailable"]:
+                downloads.append({"entityId": product["entityId"], "productId": product["id"]})
+        payload = {"listId": listId}
+        self.sendRequest(self.endpoint + "scene-list-remove",
+                         payload, self.api_key)
+
+        label = datetime.now().strftime("%Y%m%d_%H%M%S")
+        payLoad = {"downloads": downloads, "label": label,
+                   'returnAvailable': True}
+
+        print(f"Sending download request ...\n")
+        results = self.sendRequest(self.endpoint + "download-request",
+                                   payLoad, self.api_key)
+        print(f"Done sending download request\n")
+
+        result_url = []
+        for result in results['availableDownloads']:
+            print(f"Get download url: {result['url']}\n")
+            result_url.append(result['url'])
+
+        self.threads = min(maxthreads, len(result_url))
+        self.thread_download(url_list=result_url)
+
+        preparingDownloadCount = len(results['preparingDownloads'])
+        preparingDownloadIds = []
+        if preparingDownloadCount > 0:
+            for result in results['preparingDownloads']:
+                preparingDownloadIds.append(result['downloadId'])
+
+            payload = {"label": label}
+            print("Retrieving download urls...\n")
+            results = self.sendRequest(self.endpoint + "download-retrieve",
+                                       payload, self.api_key, False)
+            if results is not False:
+                result_url = []
+                for result in results['available']:
+                    if result['downloadId'] in preparingDownloadIds:
+                        preparingDownloadIds.remove(result['downloadId'])
+                        print(f"Get download url: {result['url']}\n")
+                        result_url.append(result['url'])
+
+                self.threads = min(maxthreads, len(result_url))
+                self.thread_download(url_list=result_url)
+
+                result_url = []
+                for result in results['requested']:
+                    if result['downloadId'] in preparingDownloadIds:
+                        preparingDownloadIds.remove(result['downloadId'])
+                        print(f"Get download url: {result['url']}\n")
+                        result_url.append(result['url'])
+
+                self.threads = min(maxthreads, len(result_url))
+                self.thread_download(url_list=result_url)
+
+            while len(preparingDownloadIds) > 0:
+                print(f"{len(preparingDownloadIds)} downloads are not available yet. Waiting for 30s to retrieve again\n")
+                time.sleep(30)
+                results = self.sendRequest(self.endpoint + "download-retrieve", payload, self.api_key, False)
+                if results != False:
+                    result_url = []
+                    for result in results['available']:
+                        if result['downloadId'] in preparingDownloadIds:
+                            preparingDownloadIds.remove(result['downloadId'])
+                            print(f"Get download url: {result['url']}\n" )
+                            result_url.append(result['url'])
+
+                    self.threads = min(maxthreads, len(result_url))
+                    self.thread_download(url_list=result_url)
+
+        print("Complete Downloading")
+        executionTime = round((time.time() - startTime), 2)
+        print(f'Total time: {executionTime} seconds')
+
 
 class SentinelDownloader(object):
     """

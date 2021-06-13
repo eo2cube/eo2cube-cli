@@ -1,3 +1,4 @@
+#!/usr/bin/python
 import click
 from click_help_colors import HelpColorsGroup, HelpColorsCommand
 
@@ -33,6 +34,37 @@ def dc_products(db_name, db_user,db_pass,host, port, schema):
 
     click.echo("eo2cube get_products")
 
+@eo2cube.command()
+@click.option("--aoi", default=None, help="Shapefile defining the area of interest", required=True)
+@click.option("--product", default=['landsat8'], help="Define which data to search for", required=True)
+@click.option("--begin", default='1970-01-01', help="Starting date (YYYY-MM-DD)", required=True)
+@click.option("--end", default=None, help="End date (YYYY-MM-DD)")
+@click.option("--max_cloud_cover", default=100, help="Maximum percentage of clouds (0-100)")
+@click.option("--max_results", default=50000, help="Maximum number of search results")
+@click.option("--tier", default=None, help="Landsat collection tier")
+@click.option("--ee_username", default=None, help="EarthExplorer username", required=True)
+@click.option("--ee_passwd", default=None, help="EarthExplorer password", required=True)
+@click.option("--download_path", default=None, help="Path to download folder", required=True)
+@click.option("--max_threads", default=1, help="Maximum number of threads for download")
+
+def ee_download(aoi, product, begin, end, max_cloud_cover, max_results, tier, ee_username, ee_passwd, download_path, max_threads):
+    """Search and download data using the USGS m2m api"""
+
+    from utils.downloader import EarthExplorer
+    import geopandas as gpd
+
+    aoi = gpd.read_file(aoi)
+    left = aoi.bounds.minx[0]
+    right = aoi.bounds.maxx[0]
+    bottom = aoi.bounds.miny[0]
+    top = aoi.bounds.maxy[0]
+
+    cl = EarthExplorer(username=ee_username, password=ee_passwd)
+    cl.login()
+    cl.search(collection=product, bbox = (left,bottom, right ,top), begin=begin, end=end, max_cloud_cover=max_cloud_cover,tier = tier, starting_number=1, max_results=max_results)
+    cl.download(path = download_path, maxthreads = max_threads)
+
+    click.echo("eo2cube ee_download")
 
 @eo2cube.command()
 @click.option("--aoi", default=None, help="Shapefile defining the area of interest", required=True)
@@ -55,7 +87,7 @@ def ls_espa_order(aoi, product, begin, end, max_cloud_cover, max_results,tier, e
     import datetime
     import sys
 
-    ee_url   = "https://earthexplorer.usgs.gov/inventory/json/v/1.4.1/"
+    ee_url   = "https://m2m.cr.usgs.gov/api/api/json/stable/"
 
     aoi = gpd.read_file(aoi)
     left = aoi.bounds.minx[0]
@@ -276,13 +308,13 @@ def ls_dc_update(aoi, product, begin, end, max_cloud_cover, max_results,tier, ee
 @click.option("--producttype",default="GRD",help="Define which product to search")
 
 def s1_download(download_dir, aoi, list_only,username, password, platform, producttype, start_date, end_date, date_type, min_overlap):
-    
+
     """Download Sentinel-1 scenes"""
-    
+
     import geopandas as gpd
     import os
     from utils.downloader import  SentinelDownloader
-    
+
     api_url = "https://scihub.copernicus.eu/apihub/"
 
     region = str(gpd.read_file(aoi).geometry[0])
