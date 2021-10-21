@@ -99,7 +99,6 @@ class EarthExplorer(object):
         end = datetime.strptime(end, "%Y-%m-%d")
         self.collection = collection
         search_endpoint = self.endpoint + 'scene-search'
-        print(search_endpoint)
         params = {"datasetName": collection,
                   "sceneFilter": {
                     "acquisitionFilter": {
@@ -123,14 +122,17 @@ class EarthExplorer(object):
                   "maxResults": max_results,
                   "startingNumber": starting_number
                   }
-        print(params)
         r = self.sendRequest(url=search_endpoint, data=params,
                              apiKey=self.api_key, exitIfNoResponse=True)
-
+    
         self.results = pd.json_normalize(r['results'])
         if tier is not None and collection != 'sentinel_2a':
-            self.results['tier'] = self.results['displayId'].str.split("_", expand=True)[6]
-            self.results = self.results.loc[self.results['tier'] == tier]
+            if self.results.empty:
+                print('No datasets found')
+                sys.exit()
+            else:
+                self.results['tier'] = self.results['displayId'].str.split("_", expand=True)[6]
+                self.results = self.results.loc[self.results['tier'] == tier]
 
         nrows = len(self.results.index)
         print(str(nrows) + " scenes found")
@@ -140,9 +142,9 @@ class EarthExplorer(object):
 
     def thread_download(self, url_list):
         try:
-            with concurrent.futures.ThreadPoolExecutor(self.threads) as executor:
+            with concurrent.futures.ThreadPoolExecutor(self.maxthreads) as executor:
                 fs = [executor.submit(self.downloadFile, url) for url in url_list]
-                print(fs.result())
+                #print(fs.result())
         except KeyboardInterrupt:
             try:
                 sys.exit(0)
