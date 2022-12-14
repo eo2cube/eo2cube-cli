@@ -782,7 +782,7 @@ def remove_product(db_name, db_user,db_pass, product, host, port, schema):
 def remove_dataset(db_name, db_user,db_pass, product, host, port, schema):
 
     """Remove ingested dataset from database"""
-
+    import psycopg2
     product=str(product)
     conn = psycopg2.connect(user=db_user, password=db_pass, host=host, port=port, database=db_name, options=f'-c search_path={schema}')
     cur = conn.cursor()
